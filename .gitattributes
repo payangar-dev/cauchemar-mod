@@ -1,0 +1,13 @@
+# Normalize line endings to keep the build reproducible across OSes.
+* text=auto eol=lf
+
+# Windows batch scripts must keep CRLF.
+*.bat text eol=crlf
+
+# The Gradle wrapper script must stay LF so it runs on the CI runner.
+gradlew text eol=lf
+
+# Binary assets git must not touch.
+*.jar binary
+*.png binary
+*.ogg binary
