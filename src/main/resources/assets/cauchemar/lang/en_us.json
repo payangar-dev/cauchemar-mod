@@ -1,4 +1,6 @@
 {
   "cauchemar.configuration.title": "Cauchemar Config",
-  "cauchemar.configuration.exampleToggle": "Example Toggle"
+  "cauchemar.configuration.exampleToggle": "Example Toggle",
+
+  "entity.cauchemar.mother_spider": "Mother Spider"
 }
