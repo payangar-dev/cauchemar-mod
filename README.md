@@ -11,6 +11,7 @@ A NeoForge mod for Minecraft 1.21.1.
 | Java        | 21         |
 | Toolchain   | ModDevGradle 2.0.141 |
 | Mappings    | Mojmap + Parchment 1.21.1 (2024.11.17) |
+| GeckoLib    | 4.8.4      |
 
 ## Development
 
@@ -30,21 +31,10 @@ A NeoForge mod for Minecraft 1.21.1.
 
 The built jar is written to `build/libs/cauchemar-<version>.jar`.
 
-## Project layout
+## Design
 
-```
-src/main/java/com/payangar/cauchemar/
-  Cauchemar.java          Main @Mod entry point, wires registries and config
-  CauchemarClient.java    Client-only entry point
-  Config.java             NeoForge ModConfigSpec
-  registry/
-    ModBlocks.java        DeferredRegister for blocks
-    ModItems.java         DeferredRegister for items
-src/main/resources/
-  assets/cauchemar/lang/  Translations
-src/main/templates/
-  META-INF/neoforge.mods.toml   Mod metadata (tokens expanded at build time)
-```
+What the mod is and where it is going lives in [DESIGN.md](DESIGN.md), including the project layout
+and the technical conventions.
 
 ## Versioning
 

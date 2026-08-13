@@ -1,0 +1,38 @@
+# Cauchemar — règles de travail
+
+Mod NeoForge 1.21.1. La conception vit dans [DESIGN.md](DESIGN.md), à lire avant toute intervention.
+
+## On conçoit ensemble, avant de coder
+
+C'est la règle la plus importante du projet, et elle prime sur l'envie d'avancer vite.
+
+Avant d'écrire du code pour une feature, expose à Pierre : ce que tu vas faire, par quel mécanisme
+Minecraft ça passe, ce que ça touche ailleurs dans le mod, et les alternatives quand il y en a.
+Attends son accord. Une feature dont il ne comprend pas le fonctionnement est une dette, pas un gain.
+
+Corollaire : ne pars jamais d'un besoin flou. Si la demande admet plusieurs lectures, pose la
+question au lieu de choisir à sa place.
+
+## Le DESIGN.md suit le code
+
+Toute feature livrée est décrite dans `DESIGN.md`, dans la PR qui la livre. Pas de PR de code sans
+mise à jour du document, pas de document en avance sur le code. Ce qui n'y figure pas n'existe pas.
+
+## Une feature, une PR
+
+Rien ne va directement sur `1.21.1`. Chaque feature part sur sa branche, passe par une PR, et cette
+PR contient le code, les assets et la mise à jour du `DESIGN.md`.
+
+## Rester à la portée de ce qu'on maîtrise
+
+Le projet a déjà été remis à plat une fois pour avoir couru trop loin devant. Préfère la solution
+la plus simple qui marche, quitte à la complexifier plus tard. Une brique qu'on ne sait pas
+expliquer est une brique à ne pas poser.
+
+## Divers
+
+- Vérifie les API NeoForge et GeckoLib dans la doc ou les sources avant de t'en servir, jamais de
+  mémoire. Pour lire le code d'un mod externe, passer par `/lookup-mc-mod-source`.
+- Commentaires de code, messages de commit et descriptions de PR en anglais. Le reste (DESIGN.md,
+  échanges) en français.
+- Compilation : `./gradlew compileJava`. Test en jeu : `./gradlew runClient`.

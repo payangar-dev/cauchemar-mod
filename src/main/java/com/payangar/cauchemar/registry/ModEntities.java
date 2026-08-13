@@ -23,12 +23,9 @@ public final class ModEntities {
     public static final DeferredHolder<EntityType<?>, EntityType<MotherSpiderEntity>> MOTHER_SPIDER =
             ENTITY_TYPES.register("mother_spider", () -> EntityType.Builder
                     .<MotherSpiderEntity>of(MotherSpiderEntity::new, MobCategory.MONSTER)
-                    // Small collision box around the body only: the long legs overhang it (immersion
-                    // comes from rendering, not collision). Kept under 1.0 on both axes so the
-                    // pathfinding footprint is floor(size+1) = 1x1x1, the cleanest case for the
-                    // surface-aware climbing nav (far fewer stuck/erratic paths than a 2-wide box).
-                    // The multipart hit boxes and the foot IK are positioned off the body, not this
-                    // box, so shrinking it does not move them; the visual model is unchanged.
+                    // Small collision box around the body only: the long legs overhang it, since
+                    // immersion comes from rendering, not from collision. Provisional, to be revisited
+                    // when movement is designed.
                     .sized(0.9f, 0.8f)
                     .clientTrackingRange(64)
                     .build(ResourceLocation.fromNamespaceAndPath(Cauchemar.MOD_ID, "mother_spider").toString()));
