@@ -1,4 +1,4 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;

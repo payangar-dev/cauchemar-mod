@@ -1,4 +1,4 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
 import it.unimi.dsi.fastutil.longs.Long2LongMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;

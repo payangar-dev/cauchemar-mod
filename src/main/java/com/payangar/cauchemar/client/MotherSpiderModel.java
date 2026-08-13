@@ -2,7 +2,7 @@ package com.payangar.cauchemar.client;
 
 import com.payangar.cauchemar.Cauchemar;
 import com.payangar.cauchemar.entity.MotherSpiderEntity;
-import com.payangar.cauchemar.entity.climber.Orientation;
+import com.payangar.cauchemar.movement.climber.Orientation;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.ClipContext;

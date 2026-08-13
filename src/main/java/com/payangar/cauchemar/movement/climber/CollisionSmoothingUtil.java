@@ -1,4 +1,4 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
 import it.unimi.dsi.fastutil.floats.FloatArrays;
 import net.minecraft.util.Mth;

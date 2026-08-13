@@ -1,151 +1,85 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement;
 
-import com.google.common.collect.ImmutableSet;
+import com.payangar.cauchemar.movement.climber.DirectionalPathPoint;
+import com.payangar.cauchemar.movement.climber.IClimberEntity;
+import com.payangar.cauchemar.movement.climber.Orientation;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.network.protocol.game.DebugPackets;
 import net.minecraft.util.Mth;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
-import net.minecraft.world.entity.ai.control.MoveControl;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.level.pathfinder.Node;
+import net.minecraft.world.level.pathfinder.NodeEvaluator;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.level.pathfinder.PathComputationType;
+import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.level.pathfinder.PathfindingContext;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
-import org.jetbrains.annotations.Nullable;
 
 /**
- * The climbing navigator: it lets the path start off the ground and configures the node processor to
- * place nodes on walls and ceilings, then follows the sided path in surface-relative space (steering
- * the {@link ClimberMoveController} toward the exact face the upcoming node sits on). This is what
- * makes the spider deliberately path across walls/ceilings rather than only climbing on contact.
- * Ported from Nyf's Spiders.
+ * The common Steering layer: turns a planned {@link Path} into per-tick movement by following it
+ * (waypoint advance + multi-node look-ahead + a direct-path funnel + stuck detection), then driving
+ * the move controller toward the exact surface target of the upcoming node.
+ *
+ * <p>This is the profile-agnostic skeleton lifted out of the climbing navigator (it used to live in
+ * {@code AdvancedClimberPathNavigator}). The climber-specific surface frame is read through the mob's
+ * {@link IClimberEntity} facet; the navigator's plan / level / stuck machinery is reached through
+ * {@link SteeringHost}. Behaviour is identical to the previous in-navigator implementation.
  */
-public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extends AdvancedGroundPathNavigator<T> {
-    protected final IClimberEntity climber;
+public class Steering<T extends Mob & IClimberEntity> {
+
+    /** Within this distance (blocks) of the path end the spider eases off, so it does not stop abruptly. */
+    private static final double ARRIVE_RADIUS = 2.0;
+    /** Floor on the arrive speed factor, so it keeps creeping in and actually reaches the goal. */
+    private static final double MIN_ARRIVE_FACTOR = 0.3;
+
+    /** Zero intent: tells the profile to stand still (zeroes the forward input) when there is no path. */
+    private static final MoveIntent STOP = new MoveIntent(Vec3.ZERO, 0.0, null);
+
+    private final T mob;
+    private final IClimberEntity climber;
+    private final SteeringHost host;
+    private final Level level;
+    private final NodeEvaluator nodeEvaluator;
+
+    private Path path;
 
     protected Direction verticalFacing = Direction.DOWN;
 
-    protected boolean findDirectPathPoints = false;
+    // Steering (fluidity): re-enable the existing direct-path shortcutter (was disabled, tagged
+    // //todo on canMoveDirectly). Reusing it rather than reinventing a funnel. To validate in-game:
+    // paths should get more direct (fewer staircase hops) WITHOUT the spider cutting through corners
+    // (the suspect part is canMoveDirectly ignoring entity size; low risk here since the hitbox
+    // footprint is ~1x1, but watch for clipping/stuck at corners).
+    protected boolean findDirectPathPoints = true;
 
-    public AdvancedClimberPathNavigator(T entity, Level worldIn, boolean checkObstructions, boolean canPathWalls, boolean canPathCeiling) {
-        super(entity, worldIn, checkObstructions);
+    protected float maxDistanceToWaypoint;
 
-        this.climber = entity;
-
-        if (this.nodeEvaluator instanceof AdvancedWalkNodeProcessor) {
-            AdvancedWalkNodeProcessor processor = (AdvancedWalkNodeProcessor) this.nodeEvaluator;
-            processor.setStartPathOnGround(false);
-            processor.setCanPathWalls(canPathWalls);
-            processor.setCanPathCeiling(canPathCeiling);
-        }
+    public Steering(T mob, SteeringHost host) {
+        this.mob = mob;
+        this.climber = mob;
+        this.host = host;
+        this.level = host.steeringLevel();
+        this.nodeEvaluator = host.steeringNodeEvaluator();
     }
 
-    @Override
-    protected Vec3 getTempMobPos() {
-        return this.mob.position().add(0, this.mob.getBbHeight() / 2.0f, 0);
+    /** The waypoint reach tolerance computed this tick; the navigator reads it for the debug packet. */
+    public float getMaxDistanceToWaypoint() {
+        return this.maxDistanceToWaypoint;
     }
 
-    @Override
-    @Nullable
-    public Path createPath(BlockPos pos, int checkpointRange) {
-        return this.createPath(ImmutableSet.of(pos), 8, false, checkpointRange);
-    }
+    /**
+     * Advances the followed waypoint: multi-node look-ahead (so it does not backtrack at multi-side
+     * positions), then the direct-path funnel, then stuck detection. Was {@code followThePath}.
+     */
+    public void followPath() {
+        this.path = this.host.steeringPath();
 
-    @Override
-    @Nullable
-    public Path createPath(Entity entityIn, int checkpointRange) {
-        return this.createPath(ImmutableSet.of(entityIn.blockPosition()), 16, true, checkpointRange);
-    }
-
-    @Override
-    public void tick() {
-        ++this.tick;
-
-        if (this.hasDelayedRecomputation) {
-            this.recomputePath();
-        }
-
-        if (!this.isDone()) {
-            if (this.canUpdatePath()) {
-                this.followThePath();
-            } else if (this.path != null && !this.path.isDone()) {
-                Vec3 pos = this.getTempMobPos();
-                Vec3 targetPos = this.path.getNextEntityPos(this.mob);
-
-                if (pos.y > targetPos.y && !this.mob.onGround() && Mth.floor(pos.x) == Mth.floor(targetPos.x) && Mth.floor(pos.z) == Mth.floor(targetPos.z)) {
-                    this.path.advance();
-                }
-            }
-
-            DebugPackets.sendPathFindingPacket(this.level, this.mob, this.path, this.maxDistanceToWaypoint);
-
-            if (!this.isDone()) {
-                Node targetPoint = this.path.getNode(this.path.getNextNodeIndex());
-
-                Direction dir = null;
-
-                if (targetPoint instanceof DirectionalPathPoint) {
-                    dir = ((DirectionalPathPoint) targetPoint).getPathSide();
-                }
-
-                if (dir == null) {
-                    dir = Direction.DOWN;
-                }
-
-                Vec3 targetPos = this.getExactPathingTarget(this.level, targetPoint.asBlockPos(), dir);
-
-                MoveControl moveController = this.mob.getMoveControl();
-
-                if (moveController instanceof ClimberMoveController && targetPoint instanceof DirectionalPathPoint && ((DirectionalPathPoint) targetPoint).getPathSide() != null) {
-                    ((ClimberMoveController) moveController).setMoveTo(targetPos.x, targetPos.y, targetPos.z, targetPoint.asBlockPos().relative(dir), ((DirectionalPathPoint) targetPoint).getPathSide(), this.speedModifier);
-                } else {
-                    moveController.setWantedPosition(targetPos.x, targetPos.y, targetPos.z, this.speedModifier);
-                }
-            }
-        }
-    }
-
-    public Vec3 getExactPathingTarget(BlockGetter blockaccess, BlockPos pos, Direction dir) {
-        BlockPos offsetPos = pos.relative(dir);
-
-        VoxelShape shape = blockaccess.getBlockState(offsetPos).getCollisionShape(blockaccess, offsetPos);
-
-        Direction.Axis axis = dir.getAxis();
-
-        int sign = dir.getStepX() + dir.getStepY() + dir.getStepZ();
-        double offset = shape.isEmpty() ? sign /*undo offset if no collider*/ : (sign > 0 ? shape.min(axis) - 1 : shape.max(axis));
-
-        double marginXZ = 1 - (this.mob.getBbWidth() % 1);
-        double marginY = 1 - (this.mob.getBbHeight() % 1);
-
-        double pathingOffsetXZ = (int) (this.mob.getBbWidth() + 1.0F) * 0.5D;
-        double pathingOffsetY = (int) (this.mob.getBbHeight() + 1.0F) * 0.5D - this.mob.getBbHeight() * 0.5f;
-
-        double x = offsetPos.getX() + pathingOffsetXZ + dir.getStepX() * marginXZ;
-        double y = offsetPos.getY() + pathingOffsetY + (dir == Direction.DOWN ? -pathingOffsetY : 0.0D) + (dir == Direction.UP ? -pathingOffsetY + marginY : 0.0D);
-        double z = offsetPos.getZ() + pathingOffsetXZ + dir.getStepZ() * marginXZ;
-
-        switch (axis) {
-            default:
-            case X:
-                return new Vec3(x + offset, y, z);
-            case Y:
-                return new Vec3(x, y + offset, z);
-            case Z:
-                return new Vec3(x, y, z + offset);
-        }
-    }
-
-    @Override
-    protected void followThePath() {
-        Vec3 pos = this.getTempMobPos();
+        Vec3 pos = this.host.steeringMobPos();
 
         this.maxDistanceToWaypoint = this.mob.getBbWidth() > 0.75F ? this.mob.getBbWidth() / 2.0F : 0.75F - this.mob.getBbWidth() / 2.0F;
         float maxDistanceToWaypointY = Math.max(1 /*required for e.g. slabs*/, this.mob.getBbHeight() > 0.75F ? this.mob.getBbHeight() / 2.0F : 0.75F - this.mob.getBbHeight() / 2.0F);
@@ -171,7 +105,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
                 boolean isWaypointInReach = dx < this.maxDistanceToWaypoint && dy < maxDistanceToWaypointY && dz < this.maxDistanceToWaypoint;
 
                 boolean isOnSameSideAsTarget = false;
-                if (this.canFloat() && (currentTarget.type == PathType.WATER || currentTarget.type == PathType.WATER_BORDER || currentTarget.type == PathType.LAVA)) {
+                if (this.host.steeringCanFloat() && (currentTarget.type == PathType.WATER || currentTarget.type == PathType.WATER_BORDER || currentTarget.type == PathType.LAVA)) {
                     isOnSameSideAsTarget = true;
                 } else if (currentTarget instanceof DirectionalPathPoint) {
                     Direction targetSide = ((DirectionalPathPoint) currentTarget).getPathSide();
@@ -180,7 +114,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
                     isOnSameSideAsTarget = true;
                 }
 
-                if (isOnSameSideAsTarget && (isWaypointInReach || (i == 0 && this.mob.getNavigation().canCutCorner(this.path.getNextNode().type) && this.isNextTargetInLine(pos, sizeX, sizeY, sizeZ, 1 + i)))) {
+                if (isOnSameSideAsTarget && (isWaypointInReach || (i == 0 && this.host.steeringCanCutCorner(this.path.getNextNode().type) && this.isNextTargetInLine(pos, sizeX, sizeY, sizeZ, 1 + i)))) {
                     this.path.setNextNodeIndex(this.path.getNextNodeIndex() + 1 + i);
                     break;
                 }
@@ -227,7 +161,223 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
             }
         }
 
-        this.doStuckDetection(pos);
+        this.host.steeringStuckDetection(pos);
+    }
+
+    /**
+     * Steers toward the exact surface target of the upcoming node (with its face, when the node carries
+     * one), easing off near the path end (arrive); or, when there is no path to follow, tells the
+     * profile to stand still. The resulting {@link MoveIntent} is applied through the profile here, in
+     * the navigation phase (the {@link com.payangar.cauchemar.movement.climber.ClimberMoveController}
+     * is a no-op). Was the tail of {@code AdvancedClimberPathNavigator.tick()} plus the per-tick body
+     * of the old move controller.
+     */
+    public void drive() {
+        this.path = this.host.steeringPath();
+        if (this.path == null || this.path.isDone()) {
+            // Idle: the no-op MoveControl no longer zeroes the forward input on arrival, so the profile
+            // must be told to stand still (matches the old MoveControl WAIT branch's setZza(0)).
+            this.mob.applyMovement(STOP);
+            return;
+        }
+
+        Node targetPoint = this.path.getNode(this.path.getNextNodeIndex());
+
+        Direction pathSide = null;
+        if (targetPoint instanceof DirectionalPathPoint) {
+            pathSide = ((DirectionalPathPoint) targetPoint).getPathSide();
+        }
+
+        Direction dir = pathSide != null ? pathSide : Direction.DOWN;
+
+        Vec3 targetPos = this.getExactPathingTarget(this.level, targetPoint.asBlockPos(), dir);
+
+        double speed = this.mob.getMovementSpeed() * this.arriveSpeed(this.host.steeringSpeedModifier());
+
+        if (pathSide != null) {
+            this.applySteering(targetPos, targetPoint.asBlockPos().relative(pathSide), pathSide, speed);
+        } else {
+            this.applySteering(targetPos, null, null, speed);
+        }
+    }
+
+    /**
+     * Per-tick steering toward {@code wanted}: nudges the approach onto the exact face (when the node
+     * carries one), decides the corner-rounding jump, projects the move onto the current surface plane,
+     * and emits the {@link MoveIntent} the profile executes. The transition (jump) is a steering
+     * decision carried by the intent; the profile only carries it out. Lifted verbatim from the old
+     * {@code ClimberMoveController} MOVE_TO branch (climber-specific; it reads the surface frame).
+     */
+    private void applySteering(Vec3 wanted, BlockPos block, Direction side, double speed) {
+        double dx = wanted.x - this.mob.getX();
+        double dy = wanted.y - this.mob.getY();
+        double dz = wanted.z - this.mob.getZ();
+
+        if (side != null && block != null) {
+            VoxelShape shape = this.mob.level().getBlockState(block).getCollisionShape(this.mob.level(), block);
+
+            AABB aabb = this.mob.getBoundingBox();
+
+            double ox = 0;
+            double oy = 0;
+            double oz = 0;
+
+            switch (side) {
+                case DOWN:
+                    if (aabb.minY >= block.getY() + shape.max(Direction.Axis.Y) - 0.01D) ox -= 0.1D;
+                    break;
+                case UP:
+                    if (aabb.maxY <= block.getY() + shape.min(Direction.Axis.Y) + 0.01D) oy += 0.1D;
+                    break;
+                case WEST:
+                    if (aabb.minX >= block.getX() + shape.max(Direction.Axis.X) - 0.01D) ox -= 0.1D;
+                    break;
+                case EAST:
+                    if (aabb.maxX <= block.getX() + shape.min(Direction.Axis.X) + 0.01D) ox += 0.1D;
+                    break;
+                case NORTH:
+                    if (aabb.minZ >= block.getZ() + shape.max(Direction.Axis.Z) - 0.01D) oz -= 0.1D;
+                    break;
+                case SOUTH:
+                    if (aabb.maxZ <= block.getZ() + shape.min(Direction.Axis.Z) + 0.01D) oz += 0.1D;
+                    break;
+            }
+
+            AABB blockAabb = new AABB(block.relative(side.getOpposite()));
+
+            if (aabb.intersects(blockAabb)) {
+                Direction.Axis offsetAxis = side.getAxis();
+                double offset = switch (offsetAxis) {
+                    case X -> side.getStepX() * 0.5f;
+                    case Y -> side.getStepY() * 0.5f;
+                    case Z -> side.getStepZ() * 0.5f;
+                };
+
+                double allowedOffset = shape.collide(offsetAxis, aabb.move(-block.getX(), -block.getY(), -block.getZ()), offset);
+
+                switch (side) {
+                    case DOWN:
+                        if (aabb.minY + allowedOffset < block.getY() + shape.max(Direction.Axis.Y) - 0.01D) oy = 0;
+                        break;
+                    case UP:
+                        if (aabb.maxY + allowedOffset > block.getY() + shape.min(Direction.Axis.Y) + 0.01D) oy = 0;
+                        break;
+                    case WEST:
+                        if (aabb.minX + allowedOffset < block.getX() + shape.max(Direction.Axis.X) - 0.01D) ox = 0;
+                        break;
+                    case EAST:
+                        if (aabb.maxX + allowedOffset > block.getX() + shape.min(Direction.Axis.X) + 0.01D) ox = 0;
+                        break;
+                    case NORTH:
+                        if (aabb.minZ + allowedOffset < block.getZ() + shape.max(Direction.Axis.Z) - 0.01D) oz = 0;
+                        break;
+                    case SOUTH:
+                        if (aabb.maxZ + allowedOffset > block.getZ() + shape.min(Direction.Axis.Z) + 0.01D) oz = 0;
+                        break;
+                }
+            }
+
+            dx += ox;
+            dy += oy;
+            dz += oz;
+        }
+
+        Direction mainOffsetDir = Direction.getNearest(dx, dy, dz);
+
+        float reach = switch (mainOffsetDir) {
+            case DOWN -> 0;
+            case UP -> this.mob.getBbHeight();
+            default -> this.mob.getBbWidth() * 0.5f;
+        };
+
+        double verticalOffset = Math.abs(mainOffsetDir.getStepX() * dx) + Math.abs(mainOffsetDir.getStepY() * dy) + Math.abs(mainOffsetDir.getStepZ() * dz);
+
+        Direction groundDir = this.climber.getGroundDirection().getLeft();
+
+        Vec3 jumpDir = null;
+
+        if (side != null && verticalOffset > reach - 0.05f && groundDir != side && groundDir.getAxis() != side.getAxis()) {
+            double hdx = (1 - Math.abs(mainOffsetDir.getStepX())) * dx;
+            double hdy = (1 - Math.abs(mainOffsetDir.getStepY())) * dy;
+            double hdz = (1 - Math.abs(mainOffsetDir.getStepZ())) * dz;
+
+            double hdsq = hdx * hdx + hdy * hdy + hdz * hdz;
+            if (hdsq < 0.707f) {
+                dx -= side.getStepX() * 0.2f;
+                dy -= side.getStepY() * 0.2f;
+                dz -= side.getStepZ() * 0.2f;
+
+                if (hdsq < 0.1f) {
+                    jumpDir = new Vec3(mainOffsetDir.getStepX(), mainOffsetDir.getStepY(), mainOffsetDir.getStepZ());
+                }
+            }
+        }
+
+        Orientation orientation = this.climber.getOrientation();
+        Vec3 up = orientation.getGlobal(this.mob.getYRot(), -90);
+        Vec3 offset = new Vec3(dx, dy, dz);
+        Vec3 inPlaneMove = offset.subtract(up.scale(offset.dot(up)));
+        double targetDist = inPlaneMove.length();
+
+        if (jumpDir == null && side != null && targetDist >= 0.0001D && targetDist < 0.1D && groundDir == side.getOpposite()) {
+            jumpDir = new Vec3(side.getStepX(), side.getStepY(), side.getStepZ());
+        }
+
+        this.mob.applyMovement(new MoveIntent(inPlaneMove, speed, jumpDir));
+    }
+
+    /**
+     * Arrive behaviour: scales the commanded speed down as the spider closes on the path end, so it
+     * eases into its goal instead of stopping dead (the MC-94054 overrun that would otherwise fight
+     * this is disabled for the spider, so there is nothing to reconcile here). A floor keeps it
+     * creeping in so it still reaches the goal and the navigation completes. Beyond {@link
+     * #ARRIVE_RADIUS} the base speed is untouched, so intermediate waypoints are taken at full speed.
+     */
+    private double arriveSpeed(double baseSpeed) {
+        int nodeCount = this.path.getNodeCount();
+        if (nodeCount == 0) {
+            return baseSpeed;
+        }
+
+        Vec3 goal = this.path.getEntityPosAtNode(this.mob, nodeCount - 1);
+        double dist = this.mob.position().distanceTo(goal);
+        if (dist >= ARRIVE_RADIUS) {
+            return baseSpeed;
+        }
+
+        double factor = Math.max(MIN_ARRIVE_FACTOR, dist / ARRIVE_RADIUS);
+        return baseSpeed * factor;
+    }
+
+    public Vec3 getExactPathingTarget(BlockGetter blockaccess, BlockPos pos, Direction dir) {
+        BlockPos offsetPos = pos.relative(dir);
+
+        VoxelShape shape = blockaccess.getBlockState(offsetPos).getCollisionShape(blockaccess, offsetPos);
+
+        Direction.Axis axis = dir.getAxis();
+
+        int sign = dir.getStepX() + dir.getStepY() + dir.getStepZ();
+        double offset = shape.isEmpty() ? sign /*undo offset if no collider*/ : (sign > 0 ? shape.min(axis) - 1 : shape.max(axis));
+
+        double marginXZ = 1 - (this.mob.getBbWidth() % 1);
+        double marginY = 1 - (this.mob.getBbHeight() % 1);
+
+        double pathingOffsetXZ = (int) (this.mob.getBbWidth() + 1.0F) * 0.5D;
+        double pathingOffsetY = (int) (this.mob.getBbHeight() + 1.0F) * 0.5D - this.mob.getBbHeight() * 0.5f;
+
+        double x = offsetPos.getX() + pathingOffsetXZ + dir.getStepX() * marginXZ;
+        double y = offsetPos.getY() + pathingOffsetY + (dir == Direction.DOWN ? -pathingOffsetY : 0.0D) + (dir == Direction.UP ? -pathingOffsetY + marginY : 0.0D);
+        double z = offsetPos.getZ() + pathingOffsetXZ + dir.getStepZ() * marginXZ;
+
+        switch (axis) {
+            default:
+            case X:
+                return new Vec3(x + offset, y, z);
+            case Y:
+                return new Vec3(x, y + offset, z);
+            case Z:
+                return new Vec3(x, y, z + offset);
+        }
     }
 
     private boolean isNextTargetInLine(Vec3 pos, int sizeX, int sizeY, int sizeZ, int offset) {
@@ -279,8 +429,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
     }
 
     //todo: fix this?
-    @Override
-    protected boolean canMoveDirectly(Vec3 start, Vec3 end/*, int sizeX, int sizeY, int sizeZ*/) {
+    private boolean canMoveDirectly(Vec3 start, Vec3 end/*, int sizeX, int sizeY, int sizeZ*/) {
         int sizeX = 0;//(int) this.mob.getBbWidth();
         int sizeY = 0;//(int) this.mob.getBbHeight();
         int sizeZ = 0;//(int) this.mob.getBbWidth();
@@ -428,7 +577,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
 
                     if (offsetX * dx + offsetZ * dz >= minDotProduct) {
                         PathType nodeTypeBelow = this.nodeEvaluator.getPathType(
-                                new PathfindingContext(this.level,this.mob),
+                                new PathfindingContext(this.level, this.mob),
                                 unswizzle(obx, by + (invertY ? 1 : -1), obz, ax, ay, az, Direction.Axis.X), unswizzle(obx, by + (invertY ? 1 : -1), obz, ax, ay, az, Direction.Axis.Y), unswizzle(obx, by + (invertY ? 1 : -1), obz, ax, ay, az, Direction.Axis.Z));
 
                         if (nodeTypeBelow == PathType.WATER) {
@@ -444,7 +593,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
                         }
 
                         PathType nodeType = this.nodeEvaluator.getPathType(
-                                new PathfindingContext(this.level,this.mob),
+                                new PathfindingContext(this.level, this.mob),
                                 unswizzle(obx, by, obz, ax, ay, az, Direction.Axis.X), unswizzle(obx, by, obz, ax, ay, az, Direction.Axis.Y), unswizzle(obx, by, obz, ax, ay, az, Direction.Axis.Z)
                         );
                         float f = this.mob.getPathfindingMalus(nodeType);
@@ -466,7 +615,7 @@ public class AdvancedClimberPathNavigator<T extends Mob & IClimberEntity> extend
 
     protected boolean isPositionClear(int x, int y, int z, int sizeX, int sizeY, int sizeZ, Vec3 start, double dx, double dz, double minDotProduct, Direction.Axis ax, Direction.Axis ay, Direction.Axis az) {
         for (BlockPos pos : BlockPos.betweenClosed(new BlockPos(x, y, z), new BlockPos(x + sizeX - 1, y + sizeY - 1, z + sizeZ - 1))) {
-            if (!level.isLoaded(pos)) continue;
+            if (!this.level.isLoaded(pos)) continue;
             double offsetX = swizzle(pos.getX(), pos.getY(), pos.getZ(), ax) + 0.5D - swizzle(start, ax);
             double pffsetZ = swizzle(pos.getX(), pos.getY(), pos.getZ(), az) + 0.5D - swizzle(start, az);
 

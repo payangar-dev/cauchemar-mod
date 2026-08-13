@@ -1,4 +1,4 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.control.JumpControl;

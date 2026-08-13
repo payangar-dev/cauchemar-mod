@@ -1,4 +1,4 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;

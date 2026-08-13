@@ -1,5 +1,6 @@
-package com.payangar.cauchemar.entity.climber;
+package com.payangar.cauchemar.movement.climber;
 
+import com.payangar.cauchemar.movement.MoveIntent;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.Vec3;
 import org.apache.commons.lang3.tuple.Pair;
@@ -39,4 +40,14 @@ public interface IClimberEntity extends IAdvancedPathFindingEntity {
     Pair<Direction, Vec3> getGroundDirection();
 
     void setJumpDirection(@Nullable Vec3 dir);
+
+    /** Applies a steering {@link MoveIntent} for this tick (the mob delegates to its locomotion profile). */
+    void applyMovement(MoveIntent intent);
+
+    /**
+     * Whether the entity is currently attached to (or just barely off) a climbing surface. Stays true
+     * through the brief detachments that happen while rounding a step/corner, and only goes false on a
+     * genuine multi-tick free fall. Used by the navigator to keep path following alive mid-transition.
+     */
+    boolean isAttachedToSurface();
 }

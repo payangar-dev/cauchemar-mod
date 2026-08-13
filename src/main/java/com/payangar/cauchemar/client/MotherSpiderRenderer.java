@@ -4,7 +4,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
 import com.payangar.cauchemar.entity.MotherSpiderEntity;
-import com.payangar.cauchemar.entity.climber.Orientation;
+import com.payangar.cauchemar.movement.climber.Orientation;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.core.Direction;

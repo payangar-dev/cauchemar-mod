@@ -1,40 +1,52 @@
 package com.payangar.cauchemar.entity;
 
-import com.payangar.cauchemar.entity.ai.SeekDarknessGoal;
-import com.payangar.cauchemar.entity.climber.BetterSpiderPathNavigator;
-import com.payangar.cauchemar.entity.climber.ClimberJumpController;
-import com.payangar.cauchemar.entity.climber.ClimberLookController;
-import com.payangar.cauchemar.entity.climber.ClimberMatrix4f;
-import com.payangar.cauchemar.entity.climber.ClimberMoveController;
-import com.payangar.cauchemar.entity.climber.CollisionSmoothingUtil;
-import com.payangar.cauchemar.entity.climber.IClimberEntity;
-import com.payangar.cauchemar.entity.climber.Orientation;
+import com.mojang.serialization.Dynamic;
+import com.payangar.cauchemar.Cauchemar;
+import com.payangar.cauchemar.emotion.EmotionType;
+import com.payangar.cauchemar.emotion.Emotions;
+import com.payangar.cauchemar.perception.Sight;
+import com.payangar.cauchemar.entity.ai.SpiderAi;
+import com.payangar.cauchemar.movement.climber.ClimberPathNavigator;
+import com.payangar.cauchemar.movement.climber.ClimberJumpController;
+import com.payangar.cauchemar.movement.climber.ClimberLookController;
+import com.payangar.cauchemar.movement.climber.ClimberMoveController;
+import com.payangar.cauchemar.movement.climber.ClimberHost;
+import com.payangar.cauchemar.movement.climber.ClimberLocomotion;
+import com.payangar.cauchemar.movement.climber.IClimberEntity;
+import com.payangar.cauchemar.movement.climber.Orientation;
+import com.payangar.cauchemar.movement.MoveIntent;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.Vec3i;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.tags.GameEventTags;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.pathfinder.PathType;
+import java.util.function.Predicate;
 import net.minecraft.core.Direction;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
-import net.minecraft.util.Mth;
 import net.minecraft.world.damagesource.DamageSource;
-import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MoverType;
-import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.ai.goal.FloatGoal;
-import net.minecraft.world.entity.ai.goal.LookAtPlayerGoal;
-import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
-import net.minecraft.world.entity.ai.goal.WaterAvoidingRandomStrollGoal;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.ai.Brain;
+import net.minecraft.world.entity.schedule.Activity;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.Monster;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.material.FluidState;
-import net.minecraft.world.phys.AABB;
+import net.minecraft.world.level.gameevent.DynamicGameEventListener;
+import net.minecraft.world.level.gameevent.EntityPositionSource;
+import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.level.gameevent.GameEventListener;
+import net.minecraft.world.level.gameevent.PositionSource;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.phys.shapes.Shapes;
-import net.minecraft.world.phys.shapes.VoxelShape;
 import net.neoforged.neoforge.entity.PartEntity;
 import org.apache.commons.lang3.tuple.Pair;
 import software.bernie.geckolib.animatable.GeoEntity;
@@ -44,19 +56,18 @@ import software.bernie.geckolib.animation.AnimationController;
 import software.bernie.geckolib.animation.RawAnimation;
 import software.bernie.geckolib.util.GeckoLibUtil;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
+import java.util.function.BiConsumer;
 
 /**
  * The Mother Spider, first monster of the mod.
  *
  * <p>Wanders (idle/walk), tracks players with its head, and freezes into an "observe" stance when
- * hit (placeholder trigger). It also climbs walls/ceilings: a surface-relative movement + a smoothed
- * surface normal orient the body to whatever it stands on. The climbing code is ported from Nyf's
- * Spiders (self-contained 1.20.4 branch) and adapted to 1.21.1.
+ * hit (placeholder trigger). It also climbs walls/ceilings: the surface-relative movement physics and
+ * attachment state live in {@link ClimberLocomotion} (the Climber locomotion profile), which this
+ * entity owns and delegates to. The climbing code is ported from Nyf's Spiders and adapted to 1.21.1.
  */
-public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEntity {
+public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEntity, ClimberHost {
 
     private static final RawAnimation IDLE = RawAnimation.begin().thenLoop("animation.idle");
     private static final RawAnimation WALK = RawAnimation.begin().thenLoop("animation.walk");
@@ -73,10 +84,45 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
     /** Keep "moving" true this many ticks after movement stops, so micro-stops during erratic pathing
      *  don't restart the walk animation (which pops the legs) nor flicker the foot-IK knee read. */
     private static final int WALK_ANIM_HOLD_TICKS = 6;
-    /** Effective light level at/below which a spot counts as shadow (0 = only pitch black). */
-    private static final int SHADOW_LIGHT_THRESHOLD = 0;
-    /** Horizontal radius (blocks) scanned for a dark spot before the spider panics. */
-    private static final int SHADOW_SEARCH_RADIUS = 8;
+    /** Added pathfinding cost per light level, to bias routes toward shadow without forbidding light. */
+    private static final float LIGHT_PATHING_MALUS_PER_LEVEL = 0.4f;
+
+    /** Only light at or above this level frightens her; below it she tolerates the gloom and goes about
+     *  her business (wandering, investigating). This is what lets her live in the dark without panicking
+     *  at the faintest glow. Tuned in P6. */
+    private static final int FEAR_LIGHT_THRESHOLD = 8;
+    /** Fear added per light level above the threshold, per tick: drives the flee-to-shadow. */
+    private static final float FEAR_PER_LIGHT_LEVEL = 3.0f;
+    /** Fear added per tick while on fire (far stronger than light). */
+    private static final float FEAR_ON_FIRE_PER_TICK = 20.0f;
+    /** At or above this fear the spider flees to shadow (and sprints). Tuned in P6. */
+    public static final float FLEE_FEAR_THRESHOLD = 30.0f;
+
+    /** How far the spider hears vibrations (blocks), like the Warden's listener radius. */
+    private static final int HEARING_RANGE = 16;
+    /** Ticks a heard disturbance is remembered as a place to investigate. */
+    private static final int DISTURBANCE_TTL = 200;
+    /** Noise intensity (0..1) at or above which a sound frightens rather than intrigues (an explosion). */
+    private static final float LOUD_NOISE_INTENSITY = 0.75f;
+    /** Fear added from a loud noise, scaled by its intensity. */
+    private static final float FEAR_PER_NOISE = 80.0f;
+    /** Curiosity added from a moderate noise, scaled by its intensity. */
+    private static final float CURIOSITY_PER_NOISE = 60.0f;
+    /** A noise is worth investigating when its intensity times her attention reaches this. Below it she
+     *  hears the sound (a little curiosity) but judges it not worth leaving cover for. */
+    private static final float INVESTIGATE_SALIENCE_THRESHOLD = 0.35f;
+    /** How much full hunger sharpens her attention to noises (a starving spider chases fainter sounds). */
+    private static final float HUNGER_ATTENTION_GAIN = 1.0f;
+    /** How much being on edge (curiosity) sharpens her attention to the next noise. */
+    private static final float CURIOSITY_ATTENTION_GAIN = 0.5f;
+    /** A noise within this range that she was not already watching makes her jump (a startle). */
+    private static final float STARTLE_RADIUS = 4.0f;
+    /** Fear from a startle right on top of her; scales linearly to 0 at {@link #STARTLE_RADIUS}. */
+    private static final float STARTLE_FEAR_MAX = 60.0f;
+    /** While within {@link #STARTLE_RADIUS} of a source she is wary of, fear is held at least this high,
+     *  so she keeps retreating until she reaches a safe distance and only then calms. Above
+     *  {@link #FLEE_FEAR_THRESHOLD} by design. */
+    private static final float DANGER_FEAR_FLOOR = 40.0f;
 
     private final AnimatableInstanceCache cache = GeckoLibUtil.createInstanceCache(this);
 
@@ -89,45 +135,27 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
     /** Client-only: smoothed per-leg IK foot height (leg-plane vertical); NaN = not yet initialised. */
     private final float[] legFootIkV = new float[8];
 
-    // --- Climbing (ported from Nyf's Spiders) ---
-    private double prevAttachmentOffsetX, prevAttachmentOffsetY, prevAttachmentOffsetZ;
-    private double attachmentOffsetX, attachmentOffsetY, attachmentOffsetZ;
-    private double lastAttachmentOffsetX, lastAttachmentOffsetY, lastAttachmentOffsetZ;
+    // --- Climbing locomotion (the surface-relative physics + attachment state live in the profile) ---
+    private final ClimberLocomotion<MotherSpiderEntity> locomotion;
 
-    private Vec3 attachmentNormal = new Vec3(0, 1, 0);
-    private Vec3 prevAttachmentNormal = new Vec3(0, 1, 0);
-    private Vec3 lastAttachmentOrientationNormal = new Vec3(0, 1, 0);
-
-    private int attachedTicks = 5;
-
-    private Vec3 attachedSides = new Vec3(0, 0, 0);
-    private Vec3 prevAttachedSides = new Vec3(0, 0, 0);
-
-    private boolean canClimbInWater = false;
-    private boolean canClimbInLava = false;
-    private boolean isTravelingInFluid = false;
-
-    private final float collisionsInclusionRange = 2.0f;
-    private final float collisionsSmoothingRange = 1.25f;
-
-    private Orientation orientation;
-    private Orientation renderOrientation;
-    private Pair<Direction, Vec3> groundDirection = Pair.of(Direction.DOWN, new Vec3(0, -1, 0));
-
-    private float prevOrientationYawDelta;
-    private float orientationYawDelta;
-
-    private double lerpYRot, lerpXRot, lerpYHeadRot;
-
+    /** Pre-move Y, used by the move() override to cancel vertical motion on collision. */
     private double preMoveY;
-    private Vec3 jumpDir;
+
+    /** The spider's emotional state (drives that gate its behaviour); persisted in NBT. */
+    private final Emotions emotions = new Emotions();
+
+    // --- Hearing: a plain game-event listener (vibrations without the traveling sculk particle) ---
+    private final DynamicGameEventListener<SpiderEars> dynamicGameEventListener;
 
     public MotherSpiderEntity(EntityType<? extends Monster> type, Level level) {
         super(type, level);
-        this.orientation = this.calculateOrientation(1);
+        this.locomotion = new ClimberLocomotion<>(this);
         this.moveControl = new ClimberMoveController<>(this);
         this.lookControl = new ClimberLookController<>(this);
         this.jumpControl = new ClimberJumpController<>(this);
+
+        // Hearing: the listener registers itself with the level via updateDynamicGameEventListener.
+        this.dynamicGameEventListener = new DynamicGameEventListener<>(new SpiderEars());
 
         // Body-local hit boxes (right, up, forward in blocks; forward = head-first). The small
         // collision box keeps climbing/pathfinding clean while these cover the visible body.
@@ -152,30 +180,219 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
         builder.define(MOVEMENT_MODE, MovementMode.WANDER.ordinal());
     }
 
+    // ===================== Brain (AI) =====================
+    // The spider runs on the vanilla Brain system (sensors -> memories -> behaviors -> activities),
+    // wired in SpiderAi. No goalSelector goals: leaving registerGoals unoverridden keeps it empty.
+
     @Override
-    protected void registerGoals() {
-        this.goalSelector.addGoal(0, new FloatGoal(this));
-        // Light avoidance takes priority over idle wandering: flee to shadow, panic if none near.
-        this.goalSelector.addGoal(1, new SeekDarknessGoal(this, MovementMode.SPRINT.navSpeedModifier, SHADOW_LIGHT_THRESHOLD, SHADOW_SEARCH_RADIUS));
-        this.goalSelector.addGoal(2, new WaterAvoidingRandomStrollGoal(this, MovementMode.WANDER.navSpeedModifier) {
-            @Override
-            public boolean canUse() {
-                return !isObserving() && super.canUse();
-            }
+    protected Brain<?> makeBrain(Dynamic<?> dynamic) {
+        return SpiderAi.makeBrain(this, dynamic);
+    }
 
-            @Override
-            public boolean canContinueToUse() {
-                return !isObserving() && super.canContinueToUse();
-            }
+    @Override
+    @SuppressWarnings("unchecked")
+    public Brain<MotherSpiderEntity> getBrain() {
+        return (Brain<MotherSpiderEntity>) super.getBrain();
+    }
 
-            @Override
-            public void start() {
-                setMovementMode(MovementMode.WANDER);
-                super.start();
+    @Override
+    protected void customServerAiStep() {
+        if (this.level() instanceof ServerLevel serverLevel) {
+            // Emotions first (decay toward rest), then the appraisal feeds today's stimuli, then the
+            // brain reads the resulting drives and sets the walk target the behaviors want.
+            this.emotions.tick();
+            this.updateEmotions();
+            this.getBrain().tick(serverLevel, this);
+            // Animation gait follows the locomotion actually in progress (the active walk target's
+            // speed), read once the brain has set it, so the legs can never race a crawling body nor
+            // crawl while sprinting. Read before updateActivity, which may switch activities below.
+            this.updateMovementMode();
+        }
+        super.customServerAiStep();
+        // Select the active activity (the FSM switch) after the brain ticked this frame.
+        SpiderAi.updateActivity(this);
+    }
+
+    /** The appraisal: turns the spider's situation into emotional stimuli. Grows each phase. */
+    private void updateEmotions() {
+        // Bright light -> fear: the core "shun the light" drive. Dim light (below the threshold) is
+        // tolerated, so she only flees genuine brightness; reaching the gloom lets fear decay.
+        int light = this.level().getMaxLocalRawBrightness(this.blockPosition());
+        if (light >= FEAR_LIGHT_THRESHOLD) {
+            this.emotions.add(EmotionType.FEAR, (light - FEAR_LIGHT_THRESHOLD + 1) * FEAR_PER_LIGHT_LEVEL);
+        }
+        if (this.isOnFire()) {
+            this.emotions.add(EmotionType.FEAR, FEAR_ON_FIRE_PER_TICK);
+        }
+        // Too close to a source she is wary of: hold dread until she has backed off to a safe distance.
+        // This is what makes the fearful retreat self-terminating (she calms once out of the danger
+        // radius) and gives an unexplained thing right next to her the feel of a threat.
+        // Only sustains fear that already exists (from a startle or a blast); it never creates dread for
+        // a source she is calmly tracking. In practice she is only ever this close to a disturbance right
+        // after being startled by it, so this holds the panic through the retreat and no longer.
+        this.getBrain().getMemory(MemoryModuleType.DISTURBANCE_LOCATION).ifPresent(threat -> {
+            if (this.emotions.get(EmotionType.FEAR) > 0.0f && threat.closerToCenterThan(this.position(), STARTLE_RADIUS)) {
+                this.emotions.set(EmotionType.FEAR, Math.max(this.emotions.get(EmotionType.FEAR), DANGER_FEAR_FLOOR));
             }
         });
-        this.goalSelector.addGoal(8, new LookAtPlayerGoal(this, Player.class, 8.0F));
-        this.goalSelector.addGoal(9, new RandomLookAroundGoal(this));
+    }
+
+    /**
+     * Syncs the locomotion mode to the speed of the walk target currently being executed, so the leg
+     * animation cadence always matches how fast the body is actually travelling (single source of
+     * truth: the active walk target). When no target is set she is idle, so we keep the last mode (the
+     * idle animation plays regardless of mode, gated by {@link #isMovingForAnimation()}).
+     */
+    private void updateMovementMode() {
+        MovementMode mode = this.getBrain().getMemory(MemoryModuleType.WALK_TARGET)
+                .map(target -> MovementMode.forNavSpeed(target.getSpeedModifier()))
+                .orElseGet(this::getMovementMode);
+        this.setMovementMode(mode);
+    }
+
+    /** The spider's emotional state, read by its Brain behaviors to gate actions. */
+    public Emotions getEmotions() {
+        return this.emotions;
+    }
+
+    /**
+     * How attentive she is to noises right now (a multiplier on a noise's raw intensity). Hunger and
+     * being on edge (curiosity) both sharpen it, so the same faint sound she ignores when calm and sated
+     * becomes worth a look when she is starving or already alert.
+     */
+    private float attentionGain() {
+        float hunger = this.emotions.get(EmotionType.HUNGER) / 100.0f;
+        float curiosity = this.emotions.get(EmotionType.CURIOSITY) / 100.0f;
+        return 1.0f + HUNGER_ATTENTION_GAIN * hunger + CURIOSITY_ATTENTION_GAIN * curiosity;
+    }
+
+    /** Whether a heard noise of this intensity is salient enough to leave cover and investigate. */
+    private boolean isWorthInvestigating(float intensity) {
+        return intensity * this.attentionGain() >= INVESTIGATE_SALIENCE_THRESHOLD;
+    }
+
+    /**
+     * Whether she is free to pick up a new noise to investigate: only when idle. While already
+     * investigating or fleeing, a fresh noise heightens curiosity but must not hijack her current walk
+     * target, so she never gets pulled off a vantage approach by every footstep.
+     */
+    private boolean isFreeToInvestigate() {
+        return this.getBrain().getActiveNonCoreActivity().map(activity -> activity == Activity.IDLE).orElse(true);
+    }
+
+    @Override
+    public void addAdditionalSaveData(CompoundTag compound) {
+        super.addAdditionalSaveData(compound);
+        CompoundTag emotionsTag = new CompoundTag();
+        this.emotions.save(emotionsTag);
+        compound.put("Emotions", emotionsTag);
+    }
+
+    @Override
+    public void readAdditionalSaveData(CompoundTag compound) {
+        super.readAdditionalSaveData(compound);
+        if (compound.contains("Emotions", 10)) {
+            this.emotions.load(compound.getCompound("Emotions"));
+        }
+    }
+
+    // ===================== Hearing (game-event listener, no traveling particle) =====================
+
+    @Override
+    public void updateDynamicGameEventListener(BiConsumer<DynamicGameEventListener<?>, ServerLevel> listenerConsumer) {
+        if (this.level() instanceof ServerLevel serverLevel) {
+            listenerConsumer.accept(this.dynamicGameEventListener, serverLevel);
+        }
+    }
+
+    /** Maps an event type and distance to a noise intensity in [0, 1] (closer and louder = stronger). */
+    private static float noiseIntensity(Holder<GameEvent> gameEvent, float distance) {
+        float falloff = Math.max(0.0f, 1.0f - distance / HEARING_RANGE);
+        float base;
+        if (gameEvent.is(GameEvent.EXPLODE)) {
+            base = 1.0f;
+        } else if (gameEvent.is(GameEvent.STEP)) {
+            base = 0.25f;
+        } else {
+            base = 0.6f;
+        }
+        return base * falloff;
+    }
+
+    /**
+     * The spider's "ears": a plain game-event listener that hears audible vibrations within range and
+     * routes them to curiosity (investigate) or fear (flee). Unlike the full vibration system it spawns
+     * no traveling sculk particle, and has no travel delay or wall occlusion (the visible particle was
+     * unwanted).
+     */
+    class SpiderEars implements GameEventListener {
+        private final PositionSource source = new EntityPositionSource(MotherSpiderEntity.this, MotherSpiderEntity.this.getEyeHeight());
+
+        @Override
+        public PositionSource getListenerSource() {
+            return this.source;
+        }
+
+        @Override
+        public int getListenerRadius() {
+            return HEARING_RANGE;
+        }
+
+        @Override
+        public boolean handleGameEvent(ServerLevel level, Holder<GameEvent> gameEvent, GameEvent.Context context, Vec3 pos) {
+            if (MotherSpiderEntity.this.isDeadOrDying() || !gameEvent.is(GameEventTags.WARDEN_CAN_LISTEN)) {
+                return false;
+            }
+            Entity source = context.sourceEntity();
+            if (source == MotherSpiderEntity.this) {
+                return false;
+            }
+            // Sneaking suppresses footstep-type vibrations, like vanilla.
+            if (source != null && source.isCrouching() && gameEvent.is(GameEventTags.IGNORE_VIBRATIONS_SNEAKING)) {
+                return false;
+            }
+            float distance = (float) pos.distanceTo(MotherSpiderEntity.this.position());
+            float intensity = noiseIntensity(gameEvent, distance);
+            if (intensity <= 0.0f) {
+                return false;
+            }
+            // Fear from this noise: a close sound she was not already watching makes her jump (a startle,
+            // scaled by how close, "not watching" = no line of sight = she did not see it coming), and a
+            // loud blast frightens at any range. Either way it marks the source so she can retreat while
+            // keeping an eye on it (PANIC's retreat-to-vantage); light/fire fear has no such source and
+            // just flees to shadow.
+            float fear = 0.0f;
+            boolean startled = distance <= STARTLE_RADIUS
+                    && !Sight.hasLineOfSight(level, MotherSpiderEntity.this.getEyePosition(), pos);
+            if (startled) {
+                fear += STARTLE_FEAR_MAX * (1.0f - distance / STARTLE_RADIUS);
+            }
+            if (intensity >= LOUD_NOISE_INTENSITY) {
+                fear += intensity * FEAR_PER_NOISE;
+            }
+
+            String action;
+            if (fear > 0.0f) {
+                MotherSpiderEntity.this.getEmotions().add(EmotionType.FEAR, fear);
+                MotherSpiderEntity.this.getBrain().setMemoryWithExpiry(MemoryModuleType.DISTURBANCE_LOCATION, BlockPos.containing(pos), DISTURBANCE_TTL);
+                MotherSpiderEntity.this.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
+                action = startled ? "startle-retreat" : "flee";
+            } else {
+                // Not frightening: it feeds a little curiosity, and if salient enough (and she is free to)
+                // it becomes a spot worth investigating from cover. Faint or distant sounds only cross the
+                // bar when she is hungry or already on edge.
+                MotherSpiderEntity.this.getEmotions().add(EmotionType.CURIOSITY, intensity * CURIOSITY_PER_NOISE);
+                boolean investigate = MotherSpiderEntity.this.isFreeToInvestigate() && MotherSpiderEntity.this.isWorthInvestigating(intensity);
+                if (investigate) {
+                    MotherSpiderEntity.this.getBrain().setMemoryWithExpiry(MemoryModuleType.DISTURBANCE_LOCATION, BlockPos.containing(pos), DISTURBANCE_TTL);
+                    MotherSpiderEntity.this.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
+                }
+                action = investigate ? "investigate" : "curiosity-only";
+            }
+            // TEMPORARY debug (remove in P6): confirms what she hears and how she reacts.
+            Cauchemar.LOGGER.info("[spider] heard noise: dist={} intensity={} action={}", distance, intensity, action);
+            return true;
+        }
     }
 
     @Override
@@ -304,7 +521,7 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
     protected PathNavigation createNavigation(Level level) {
         // Surface-aware navigation: the A* search can place path nodes on walls and ceilings, so the
         // spider deliberately routes onto any climbable surface (not only when it bumps one).
-        BetterSpiderPathNavigator<MotherSpiderEntity> navigation = new BetterSpiderPathNavigator<>(this, level, false);
+        ClimberPathNavigator<MotherSpiderEntity> navigation = new ClimberPathNavigator<>(this, level);
         navigation.setCanFloat(true);
         return navigation;
     }
@@ -321,39 +538,46 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
         return 0;
     }
 
-    // ===================== Climbing: surface travel & sticking =====================
+    @Override
+    public float getPathingMalus(BlockGetter cache, Mob entity, PathType nodeType, BlockPos pos, Vec3i direction, Predicate<Direction> sides) {
+        float base = entity.getPathfindingMalus(nodeType);
+        if (base < 0.0F) {
+            return base; // already forbidden, leave it
+        }
+        // Bias every route toward shadow: add a cost proportional to the cell's light, so the spider
+        // prefers dark paths and only crosses lit cells when there is no darker way around. This biases
+        // the A* cost, it does not forbid light, so a forced crossing stays possible. Light is read from
+        // the live level (pathfinding is synchronous on the server thread).
+        int light = this.level().getMaxLocalRawBrightness(pos);
+        return base + light * LIGHT_PATHING_MALUS_PER_LEVEL;
+    }
+
+    // ===================== Climbing: bridges + delegation to the locomotion profile =====================
+
+    // Bridges so ClimberLocomotion can reach protected/super behaviour from outside the entity.
+    @Override
+    public void climberSuperTravel(Vec3 relative) {
+        super.travel(relative);
+    }
+
+    @Override
+    public void climberUpdateAnimation() {
+        this.calculateEntityAnimation(true);
+    }
+
+    @Override
+    public float climberJumpPower() {
+        return this.getJumpPower();
+    }
+
+    @Override
+    public boolean climberAffectedByFluids() {
+        return this.isAffectedByFluids();
+    }
 
     @Override
     public void travel(Vec3 relative) {
-        boolean canTravel = this.isEffectiveAi() || this.isControlledByLocalInstance();
-        this.isTravelingInFluid = false;
-
-        FluidState fluidState = this.level().getFluidState(this.blockPosition());
-
-        if (!this.canClimbInWater && this.isInWater() && this.isAffectedByFluids() && !this.canStandOnFluid(fluidState)) {
-            this.isTravelingInFluid = true;
-            if (canTravel) {
-                super.travel(relative);
-                this.updateOffsetsAndOrientation();
-                return;
-            }
-        } else if (!this.canClimbInLava && this.isInLava() && this.isAffectedByFluids() && !this.canStandOnFluid(fluidState)) {
-            this.isTravelingInFluid = true;
-            if (canTravel) {
-                super.travel(relative);
-                this.updateOffsetsAndOrientation();
-                return;
-            }
-        } else if (canTravel) {
-            this.updateWalkingSide();
-            this.travelOnGround(relative);
-        }
-
-        if (!canTravel) {
-            this.calculateEntityAnimation(true);
-        }
-
-        this.updateOffsetsAndOrientation();
+        this.locomotion.travel(relative);
     }
 
     @Override
@@ -366,37 +590,26 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
         this.setOnGround(this.horizontalCollision || this.verticalCollision);
     }
 
-    private double getClimbGravity() {
-        if (this.isNoGravity()) {
-            return 0;
+    @Override
+    public void jumpFromGround() {
+        if (!this.locomotion.onJump()) {
+            super.jumpFromGround();
         }
-        double gravity = 0.08D;
-        boolean isFalling = this.getDeltaMovement().y <= 0.0D;
-        if (isFalling && this.hasEffect(MobEffects.SLOW_FALLING)) {
-            gravity = 0.1D;
-        }
-        return gravity;
-    }
-
-    private Vec3 getStickingForce(Pair<Direction, Vec3> walkingSide) {
-        double uprightness = Math.max(this.attachmentNormal.y, 0);
-        double gravity = this.getClimbGravity();
-        double stickingForce = gravity * uprightness + 0.08D * (1 - uprightness);
-        return walkingSide.getRight().scale(stickingForce);
-    }
-
-    private float getRelevantMoveFactor(float slipperiness) {
-        // Air move factor (vanilla getFlyingSpeed ~0.02) inlined; the ground branch is the usual case.
-        return this.onGround() ? this.getSpeed() * (0.16277136F / (slipperiness * slipperiness * slipperiness)) : 0.02F;
-    }
-
-    private float getBlockSlipperiness(BlockPos pos) {
-        return this.level().getBlockState(pos).getBlock().getFriction() * 0.91f;
     }
 
     @Override
     public Pair<Direction, Vec3> getGroundDirection() {
-        return this.groundDirection;
+        return this.locomotion.getGroundDirection();
+    }
+
+    @Override
+    public Direction getGroundSide() {
+        return this.locomotion.getGroundSide();
+    }
+
+    @Override
+    public boolean isAttachedToSurface() {
+        return this.locomotion.isAttachedToSurface();
     }
 
     @Override
@@ -406,501 +619,42 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
 
     @Override
     public void setJumpDirection(Vec3 dir) {
-        this.jumpDir = dir != null ? dir.normalize() : null;
-    }
-
-    private void setStepHeightBase(double value) {
-        AttributeInstance attr = this.getAttribute(Attributes.STEP_HEIGHT);
-        if (attr != null) {
-            attr.setBaseValue(value);
-        }
-    }
-
-    private void setPositionToBoundingBox() {
-        AABB box = this.getBoundingBox();
-        this.setPosRaw((box.minX + box.maxX) / 2.0D, box.minY, (box.minZ + box.maxZ) / 2.0D);
-    }
-
-    private void travelOnGround(Vec3 relative) {
-        Orientation orientation = this.getOrientation();
-
-        Vec3 forwardVector = orientation.getGlobal(this.getYRot(), 0);
-        Vec3 strafeVector = orientation.getGlobal(this.getYRot() + 90.0f, 0);
-        Vec3 upVector = orientation.getGlobal(this.getYRot(), -90.0f);
-
-        Pair<Direction, Vec3> groundDirection = this.getGroundDirection();
-        Vec3 stickingForce = this.getStickingForce(groundDirection);
-
-        boolean isFalling = this.getDeltaMovement().y <= 0.0D;
-        if (isFalling && this.hasEffect(MobEffects.SLOW_FALLING)) {
-            this.fallDistance = 0;
-        }
-
-        float forward = (float) relative.z;
-        float strafe = (float) relative.x;
-
-        if (forward != 0 || strafe != 0) {
-            float slipperiness = 0.91f;
-
-            if (this.onGround()) {
-                BlockPos offsetPos = this.blockPosition().relative(groundDirection.getLeft());
-                slipperiness = this.getBlockSlipperiness(offsetPos);
-            }
-
-            float f = forward * forward + strafe * strafe;
-            if (f >= 1.0E-4F) {
-                f = Math.max(Mth.sqrt(f), 1.0f);
-                f = this.getRelevantMoveFactor(slipperiness) / f;
-                forward *= f;
-                strafe *= f;
-
-                Vec3 movementOffset = new Vec3(
-                        forwardVector.x * forward + strafeVector.x * strafe,
-                        forwardVector.y * forward + strafeVector.y * strafe,
-                        forwardVector.z * forward + strafeVector.z * strafe);
-
-                double px = this.getX();
-                double py = this.getY();
-                double pz = this.getZ();
-                Vec3 motion = this.getDeltaMovement();
-                AABB aabb = this.getBoundingBox();
-
-                // Probe actual movement vector.
-                this.move(MoverType.SELF, movementOffset);
-                Vec3 movementDir = new Vec3(this.getX() - px, this.getY() - py, this.getZ() - pz).normalize();
-                this.setBoundingBox(aabb);
-                this.setPositionToBoundingBox();
-                this.setDeltaMovement(motion);
-
-                // Probe collision normal.
-                Vec3 probeVector = new Vec3(
-                        Math.abs(movementDir.x) < 0.001D ? -Math.signum(upVector.x) : 0,
-                        Math.abs(movementDir.y) < 0.001D ? -Math.signum(upVector.y) : 0,
-                        Math.abs(movementDir.z) < 0.001D ? -Math.signum(upVector.z) : 0).normalize().scale(0.0001D);
-                this.move(MoverType.SELF, probeVector);
-
-                Vec3 collisionNormal = new Vec3(
-                        Math.abs(this.getX() - px - probeVector.x) > 0.000001D ? Math.signum(-probeVector.x) : 0,
-                        Math.abs(this.getY() - py - probeVector.y) > 0.000001D ? Math.signum(-probeVector.y) : 0,
-                        Math.abs(this.getZ() - pz - probeVector.z) > 0.000001D ? Math.signum(-probeVector.z) : 0).normalize();
-
-                this.setBoundingBox(aabb);
-                this.setPositionToBoundingBox();
-                this.setDeltaMovement(motion);
-
-                // Movement vector projected onto the surface.
-                Vec3 surfaceMovementDir = movementDir.subtract(collisionNormal.scale(collisionNormal.dot(movementDir))).normalize();
-
-                boolean isInnerCorner = Math.abs(collisionNormal.x) + Math.abs(collisionNormal.y) + Math.abs(collisionNormal.z) > 1.0001f;
-
-                if (!isInnerCorner) {
-                    movementDir = surfaceMovementDir;
-                }
-
-                stickingForce = stickingForce.subtract(surfaceMovementDir.scale(surfaceMovementDir.normalize().dot(stickingForce)));
-
-                float moveSpeed = Mth.sqrt(forward * forward + strafe * strafe);
-                this.setDeltaMovement(this.getDeltaMovement().add(movementDir.scale(moveSpeed)));
-            }
-        }
-
-        this.setDeltaMovement(this.getDeltaMovement().add(stickingForce));
-
-        double px = this.getX();
-        double py = this.getY();
-        double pz = this.getZ();
-        Vec3 motion = this.getDeltaMovement();
-
-        this.move(MoverType.SELF, motion);
-
-        this.prevAttachedSides = this.attachedSides;
-        this.attachedSides = new Vec3(
-                Math.abs(this.getX() - px - motion.x) > 0.001D ? -Math.signum(motion.x) : 0,
-                Math.abs(this.getY() - py - motion.y) > 0.001D ? -Math.signum(motion.y) : 0,
-                Math.abs(this.getZ() - pz - motion.z) > 0.001D ? -Math.signum(motion.z) : 0);
-
-        float slipperiness = 0.91f;
-        if (this.onGround()) {
-            this.fallDistance = 0;
-            BlockPos offsetPos = this.blockPosition().relative(groundDirection.getLeft());
-            slipperiness = this.getBlockSlipperiness(offsetPos);
-        }
-
-        motion = this.getDeltaMovement();
-        Vec3 orthogonalMotion = upVector.scale(upVector.dot(motion));
-        Vec3 tangentialMotion = motion.subtract(orthogonalMotion);
-
-        this.setDeltaMovement(
-                tangentialMotion.x * slipperiness + orthogonalMotion.x * 0.98f,
-                tangentialMotion.y * slipperiness + orthogonalMotion.y * 0.98f,
-                tangentialMotion.z * slipperiness + orthogonalMotion.z * 0.98f);
-
-        boolean detachedX = this.attachedSides.x != this.prevAttachedSides.x && Math.abs(this.attachedSides.x) < 0.001D;
-        boolean detachedY = this.attachedSides.y != this.prevAttachedSides.y && Math.abs(this.attachedSides.y) < 0.001D;
-        boolean detachedZ = this.attachedSides.z != this.prevAttachedSides.z && Math.abs(this.attachedSides.z) < 0.001D;
-
-        if (detachedX || detachedY || detachedZ) {
-            float stepHeight = this.maxUpStep();
-            this.setStepHeightBase(0);
-
-            boolean prevOnGround = this.onGround();
-            boolean prevCollidedHorizontally = this.horizontalCollision;
-            boolean prevCollidedVertically = this.verticalCollision;
-
-            this.move(MoverType.SELF, new Vec3(
-                    detachedX ? -this.prevAttachedSides.x * 0.25f : 0,
-                    detachedY ? -this.prevAttachedSides.y * 0.25f : 0,
-                    detachedZ ? -this.prevAttachedSides.z * 0.25f : 0));
-
-            Vec3 axis = this.prevAttachedSides.normalize();
-            Vec3 attachVector = upVector.scale(-1);
-            attachVector = attachVector.subtract(axis.scale(axis.dot(attachVector)));
-
-            if (Math.abs(attachVector.x) > Math.abs(attachVector.y) && Math.abs(attachVector.x) > Math.abs(attachVector.z)) {
-                attachVector = new Vec3(Math.signum(attachVector.x), 0, 0);
-            } else if (Math.abs(attachVector.y) > Math.abs(attachVector.z)) {
-                attachVector = new Vec3(0, Math.signum(attachVector.y), 0);
-            } else {
-                attachVector = new Vec3(0, 0, Math.signum(attachVector.z));
-            }
-
-            double attachDst = motion.length() + 0.1f;
-
-            AABB aabb = this.getBoundingBox();
-            motion = this.getDeltaMovement();
-
-            for (int i = 0; i < 2 && !this.onGround(); i++) {
-                this.move(MoverType.SELF, attachVector.scale(attachDst));
-            }
-
-            this.setStepHeightBase(stepHeight);
-
-            if (!this.onGround()) {
-                this.setBoundingBox(aabb);
-                this.setPositionToBoundingBox();
-                this.setDeltaMovement(motion);
-                this.setOnGround(prevOnGround);
-                this.horizontalCollision = prevCollidedHorizontally;
-                this.verticalCollision = prevCollidedVertically;
-            } else {
-                this.setDeltaMovement(Vec3.ZERO);
-            }
-        }
-
-        this.calculateEntityAnimation(true);
+        this.locomotion.setJumpDirection(dir);
     }
 
     @Override
-    public void jumpFromGround() {
-        if (!this.onJump()) {
-            super.jumpFromGround();
-        }
-    }
-
-    private boolean onJump() {
-        if (this.jumpDir != null) {
-            float jumpStrength = this.getJumpPower();
-            if (this.hasEffect(MobEffects.JUMP)) {
-                jumpStrength += 0.1F * (float) (this.getEffect(MobEffects.JUMP).getAmplifier() + 1);
-            }
-
-            Vec3 motion = this.getDeltaMovement();
-            Vec3 orthogonalMotion = this.jumpDir.scale(this.jumpDir.dot(motion));
-            Vec3 tangentialMotion = motion.subtract(orthogonalMotion);
-
-            this.setDeltaMovement(
-                    tangentialMotion.x + this.jumpDir.x * jumpStrength,
-                    tangentialMotion.y + this.jumpDir.y * jumpStrength,
-                    tangentialMotion.z + this.jumpDir.z * jumpStrength);
-
-            if (this.isSprinting()) {
-                Vec3 boost = this.getOrientation().getGlobal(this.getYRot(), 0).scale(0.2f);
-                this.setDeltaMovement(this.getDeltaMovement().add(boost));
-            }
-
-            this.hasImpulse = true;
-            return true;
-        }
-        return false;
-    }
-
-    // ===================== Climbing: surface normal / attachment =====================
-
-    /** Picks the most likely surface to stick to and a weighted "down" direction toward it. */
-    private void updateWalkingSide() {
-        AABB entityBox = this.getBoundingBox();
-
-        double closestFacingDst = Double.MAX_VALUE;
-        Direction closestFacing = null;
-        Vec3 weighting = new Vec3(0, 0, 0);
-
-        float stickingDistance = this.zza != 0 ? 1.5f : 0.1f;
-
-        for (Direction facing : Direction.values()) {
-            List<AABB> collisionBoxes = this.getCollisionBoxes(
-                    entityBox.inflate(0.2f).expandTowards(facing.getStepX() * stickingDistance, facing.getStepY() * stickingDistance, facing.getStepZ() * stickingDistance));
-
-            double closestDst = Double.MAX_VALUE;
-
-            for (AABB collisionBox : collisionBoxes) {
-                switch (facing) {
-                    case EAST, WEST ->
-                            closestDst = Math.min(closestDst, Math.abs(calculateXOffset(entityBox, collisionBox, -facing.getStepX() * stickingDistance)));
-                    case UP, DOWN ->
-                            closestDst = Math.min(closestDst, Math.abs(calculateYOffset(entityBox, collisionBox, -facing.getStepY() * stickingDistance)));
-                    case NORTH, SOUTH ->
-                            closestDst = Math.min(closestDst, Math.abs(calculateZOffset(entityBox, collisionBox, -facing.getStepZ() * stickingDistance)));
-                }
-            }
-
-            if (closestDst < closestFacingDst) {
-                closestFacingDst = closestDst;
-                closestFacing = facing;
-            }
-
-            if (closestDst < Double.MAX_VALUE) {
-                weighting = weighting.add(new Vec3(facing.getStepX(), facing.getStepY(), facing.getStepZ()).scale(1 - Math.min(closestDst, stickingDistance) / stickingDistance));
-            }
-        }
-
-        if (closestFacing == null) {
-            this.groundDirection = Pair.of(Direction.DOWN, new Vec3(0, -1, 0));
-        } else {
-            this.groundDirection = Pair.of(closestFacing, weighting.normalize().add(0, -0.001f, 0).normalize());
-        }
-    }
-
-    private List<AABB> getCollisionBoxes(AABB aabb) {
-        List<AABB> boxes = new ArrayList<>();
-        this.forEachCollisionBox(aabb, (minX, minY, minZ, maxX, maxY, maxZ) -> boxes.add(new AABB(minX, minY, minZ, maxX, maxY, maxZ)));
-        return boxes;
-    }
-
-    private void forEachCollisionBox(AABB aabb, Shapes.DoubleLineConsumer action) {
-        for (VoxelShape shape : this.level().getBlockCollisions(this, aabb)) {
-            shape.forAllBoxes(action);
-        }
+    public void applyMovement(MoveIntent intent) {
+        this.locomotion.applyMovement(intent);
     }
 
     @Override
     public Orientation calculateOrientation(float partialTicks) {
-        Vec3 normal = this.prevAttachmentNormal.add(this.attachmentNormal.subtract(this.prevAttachmentNormal).scale(partialTicks));
-
-        Vec3 localZ = new Vec3(0, 0, 1);
-        Vec3 localY = new Vec3(0, 1, 0);
-        Vec3 localX = new Vec3(1, 0, 0);
-
-        float componentZ = (float) localZ.dot(normal);
-        float componentY;
-        float componentX = (float) localX.dot(normal);
-
-        float yaw = (float) Math.toDegrees(Mth.atan2(componentX, componentZ));
-
-        localZ = new Vec3(Math.sin(Math.toRadians(yaw)), 0, Math.cos(Math.toRadians(yaw)));
-        localY = new Vec3(0, 1, 0);
-        localX = new Vec3(Math.sin(Math.toRadians(yaw - 90)), 0, Math.cos(Math.toRadians(yaw - 90)));
-
-        componentZ = (float) localZ.dot(normal);
-        componentY = (float) localY.dot(normal);
-        componentX = (float) localX.dot(normal);
-
-        float pitch = (float) Math.toDegrees(Mth.atan2(Mth.sqrt(componentX * componentX + componentZ * componentZ), componentY));
-
-        ClimberMatrix4f m = new ClimberMatrix4f();
-        m.multiply(new ClimberMatrix4f((float) Math.toRadians(yaw), 0, 1, 0));
-        m.multiply(new ClimberMatrix4f((float) Math.toRadians(pitch), 1, 0, 0));
-        m.multiply(new ClimberMatrix4f((float) Math.toRadians((float) Math.signum(0.5f - componentY - componentZ - componentX) * yaw), 0, 1, 0));
-
-        localZ = m.multiply(new Vec3(0, 0, -1));
-        localY = m.multiply(new Vec3(0, 1, 0));
-        localX = m.multiply(new Vec3(1, 0, 0));
-
-        return new Orientation(normal, localZ, localY, localX, componentZ, componentY, componentX, yaw, pitch);
+        return this.locomotion.calculateOrientation(partialTicks);
     }
-
-    /**
-     * Recomputes the smoothed surface normal + attachment offset and blends it in. On the server it
-     * also rebases the entity's yaw/pitch into the new surface frame so the AI's "forward" stays
-     * consistent across floor/wall/ceiling transitions. Ported from Nyf's {@code
-     * updateOffsetsAndOrientation}.
-     */
-    private void updateOffsetsAndOrientation() {
-        Vec3 direction = this.getOrientation().getGlobal(this.getYRot(), this.getXRot());
-
-        boolean isAttached = false;
-
-        double baseStickingOffsetX = 0.0f;
-        double baseStickingOffsetY = this.getVerticalOffset(1);
-        double baseStickingOffsetZ = 0.0f;
-        Vec3 baseOrientationNormal = new Vec3(0, 1, 0);
-
-        if (!this.isTravelingInFluid && this.onGround() && this.getVehicle() == null) {
-            Vec3 p = this.position();
-            Vec3 s = p.add(0, this.getBbHeight() * 0.5f, 0);
-            AABB inclusionBox = new AABB(s.x, s.y, s.z, s.x, s.y, s.z).inflate(this.collisionsInclusionRange);
-
-            Pair<Vec3, Vec3> attachmentPoint = CollisionSmoothingUtil.findClosestPoint(
-                    consumer -> this.forEachCollisionBox(inclusionBox, consumer),
-                    s, this.attachmentNormal.scale(-1), this.collisionsSmoothingRange, 1.0f, 0.001f, 20, 0.05f, s);
-
-            AABB entityBox = this.getBoundingBox();
-
-            if (attachmentPoint != null) {
-                Vec3 attachmentPos = attachmentPoint.getLeft();
-
-                double dx = Math.max(entityBox.minX - attachmentPos.x, attachmentPos.x - entityBox.maxX);
-                double dy = Math.max(entityBox.minY - attachmentPos.y, attachmentPos.y - entityBox.maxY);
-                double dz = Math.max(entityBox.minZ - attachmentPos.z, attachmentPos.z - entityBox.maxZ);
-
-                if (Math.max(dx, Math.max(dy, dz)) < 0.5f) {
-                    isAttached = true;
-
-                    this.lastAttachmentOffsetX = Mth.clamp(attachmentPos.x - p.x, -this.getBbWidth() / 2, this.getBbWidth() / 2);
-                    this.lastAttachmentOffsetY = Mth.clamp(attachmentPos.y - p.y, 0, this.getBbHeight());
-                    this.lastAttachmentOffsetZ = Mth.clamp(attachmentPos.z - p.z, -this.getBbWidth() / 2, this.getBbWidth() / 2);
-                    this.lastAttachmentOrientationNormal = attachmentPoint.getRight();
-                }
-            }
-        }
-
-        this.prevAttachmentOffsetX = this.attachmentOffsetX;
-        this.prevAttachmentOffsetY = this.attachmentOffsetY;
-        this.prevAttachmentOffsetZ = this.attachmentOffsetZ;
-        this.prevAttachmentNormal = this.attachmentNormal;
-
-        float attachmentBlend = this.attachedTicks * 0.2f;
-
-        this.attachmentOffsetX = baseStickingOffsetX + (this.lastAttachmentOffsetX - baseStickingOffsetX) * attachmentBlend;
-        this.attachmentOffsetY = baseStickingOffsetY + (this.lastAttachmentOffsetY - baseStickingOffsetY) * attachmentBlend;
-        this.attachmentOffsetZ = baseStickingOffsetZ + (this.lastAttachmentOffsetZ - baseStickingOffsetZ) * attachmentBlend;
-        this.attachmentNormal = baseOrientationNormal.add(this.lastAttachmentOrientationNormal.subtract(baseOrientationNormal).scale(attachmentBlend)).normalize();
-
-        if (!isAttached) {
-            this.attachedTicks = Math.max(0, this.attachedTicks - 1);
-        } else {
-            this.attachedTicks = Math.min(5, this.attachedTicks + 1);
-        }
-
-        this.orientation = this.calculateOrientation(1);
-
-        // Rebase the entity rotations into the new surface frame (server side only; the client
-        // receives the rebased rotations through normal entity sync and lerps them).
-        if (!this.level().isClientSide) {
-            Pair<Float, Float> newRotations = this.getOrientation().getLocalRotation(direction);
-
-            float yawDelta = newRotations.getLeft() - this.getYRot();
-            float pitchDelta = newRotations.getRight() - this.getXRot();
-
-            this.prevOrientationYawDelta = this.orientationYawDelta;
-            this.orientationYawDelta = yawDelta;
-
-            this.setYRot(Mth.wrapDegrees(this.getYRot() + yawDelta));
-            this.yRotO = this.wrapAngleInRange(this.yRotO, this.getYRot());
-            this.lerpYRot = Mth.wrapDegrees(this.lerpYRot + yawDelta);
-
-            this.yBodyRot = Mth.wrapDegrees(this.yBodyRot + yawDelta);
-            this.yBodyRotO = this.wrapAngleInRange(this.yBodyRotO, this.yBodyRot);
-
-            this.yHeadRot = Mth.wrapDegrees(this.yHeadRot + yawDelta);
-            this.yHeadRotO = this.wrapAngleInRange(this.yHeadRotO, this.yHeadRot);
-            this.lerpYHeadRot = Mth.wrapDegrees(this.lerpYHeadRot + yawDelta);
-
-            this.setXRot(Mth.wrapDegrees(this.getXRot() + pitchDelta));
-            this.xRotO = this.wrapAngleInRange(this.xRotO, this.getXRot());
-            this.lerpXRot = Mth.wrapDegrees(this.lerpXRot + pitchDelta);
-        }
-    }
-
-    private float wrapAngleInRange(float angle, float target) {
-        while (target - angle < -180.0F) {
-            angle -= 360.0F;
-        }
-        while (target - angle >= 180.0F) {
-            angle += 360.0F;
-        }
-        return angle;
-    }
-
-    private static double calculateXOffset(AABB aabb, AABB other, double offsetX) {
-        if (other.maxY > aabb.minY && other.minY < aabb.maxY && other.maxZ > aabb.minZ && other.minZ < aabb.maxZ) {
-            if (offsetX > 0.0D && other.maxX <= aabb.minX) {
-                double dx = aabb.minX - other.maxX;
-                if (dx < offsetX) {
-                    offsetX = dx;
-                }
-            } else if (offsetX < 0.0D && other.minX >= aabb.maxX) {
-                double dx = aabb.maxX - other.minX;
-                if (dx > offsetX) {
-                    offsetX = dx;
-                }
-            }
-        }
-        return offsetX;
-    }
-
-    private static double calculateYOffset(AABB aabb, AABB other, double offsetY) {
-        if (other.maxX > aabb.minX && other.minX < aabb.maxX && other.maxZ > aabb.minZ && other.minZ < aabb.maxZ) {
-            if (offsetY > 0.0D && other.maxY <= aabb.minY) {
-                double dy = aabb.minY - other.maxY;
-                if (dy < offsetY) {
-                    offsetY = dy;
-                }
-            } else if (offsetY < 0.0D && other.minY >= aabb.maxY) {
-                double dy = aabb.maxY - other.minY;
-                if (dy > offsetY) {
-                    offsetY = dy;
-                }
-            }
-        }
-        return offsetY;
-    }
-
-    private static double calculateZOffset(AABB aabb, AABB other, double offsetZ) {
-        if (other.maxX > aabb.minX && other.minX < aabb.maxX && other.maxY > aabb.minY && other.minY < aabb.maxY) {
-            if (offsetZ > 0.0D && other.maxZ <= aabb.minZ) {
-                double dz = aabb.minZ - other.maxZ;
-                if (dz < offsetZ) {
-                    offsetZ = dz;
-                }
-            } else if (offsetZ < 0.0D && other.minZ >= aabb.maxZ) {
-                double dz = aabb.maxZ - other.minZ;
-                if (dz > offsetZ) {
-                    offsetZ = dz;
-                }
-            }
-        }
-        return offsetZ;
-    }
-
-    // ===================== IClimberEntity (rendering accessors) =====================
 
     @Override
     public Orientation getOrientation() {
-        return this.orientation;
+        return this.locomotion.getOrientation();
     }
 
     @Override
     public void setRenderOrientation(Orientation orientation) {
-        this.renderOrientation = orientation;
+        this.locomotion.setRenderOrientation(orientation);
     }
 
     @Override
     public Orientation getRenderOrientation() {
-        return this.renderOrientation;
+        return this.locomotion.getRenderOrientation();
     }
 
     @Override
     public float getVerticalOffset(float partialTicks) {
-        return 0.075f;
+        return this.locomotion.getVerticalOffset(partialTicks);
     }
 
     @Override
     public float getAttachmentOffset(Direction.Axis axis, float partialTicks) {
-        return switch (axis) {
-            case X -> (float) (this.prevAttachmentOffsetX + (this.attachmentOffsetX - this.prevAttachmentOffsetX) * partialTicks);
-            case Y -> (float) (this.prevAttachmentOffsetY + (this.attachmentOffsetY - this.prevAttachmentOffsetY) * partialTicks);
-            case Z -> (float) (this.prevAttachmentOffsetZ + (this.attachmentOffsetZ - this.prevAttachmentOffsetZ) * partialTicks);
-        };
+        return this.locomotion.getAttachmentOffset(axis, partialTicks);
     }
 
     // ===================== Attributes & animation =====================
@@ -911,7 +665,9 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
                 .add(Attributes.MOVEMENT_SPEED, 0.25)
                 .add(Attributes.ATTACK_DAMAGE, 6.0)
                 .add(Attributes.KNOCKBACK_RESISTANCE, 0.5)
-                .add(Attributes.FOLLOW_RANGE, 24.0)
+                // Wide enough that the shadow search can path to darkness farther away (the
+                // pathfinding region and node budget both scale with FOLLOW_RANGE).
+                .add(Attributes.FOLLOW_RANGE, 32.0)
                 // Low step height: the spider climbs surfaces instead of stepping up blocks.
                 .add(Attributes.STEP_HEIGHT, 0.1);
     }
@@ -925,7 +681,7 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
             }
 
             // Moving is tracked in tick() with a short hold (3D, climb-aware), so the walk clip does
-            // not restart on micro-stops. Walk playback speed is fixed per mode (wander x1/walk x2/sprint x4).
+            // not restart on micro-stops. Walk playback speed is fixed per mode (wander x1/walk x2/sprint x5).
             if (isMovingForAnimation()) {
                 state.getController().setAnimationSpeed(getMovementMode().animationSpeed);
                 return state.setAndContinue(WALK);
@@ -952,8 +708,8 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
         WANDER(0.6, 1.0),
         /** Heading to an unhurried objective. */
         WALK(1.0, 2.0),
-        /** Rushing to an urgent objective (fleeing to shadow / panic). */
-        SPRINT(2.5, 4.0);
+        /** Rushing to an urgent objective (fleeing to shadow). */
+        SPRINT(1.8, 5.0);
 
         public final double navSpeedModifier;
         public final double animationSpeed;
@@ -961,6 +717,23 @@ public class MotherSpiderEntity extends Monster implements GeoEntity, IClimberEn
         MovementMode(double navSpeedModifier, double animationSpeed) {
             this.navSpeedModifier = navSpeedModifier;
             this.animationSpeed = animationSpeed;
+        }
+
+        /**
+         * The mode whose nav speed is closest to {@code navSpeed}: maps an active walk target's speed
+         * modifier back to a gait so the animation matches the locomotion the behaviors requested.
+         */
+        public static MovementMode forNavSpeed(double navSpeed) {
+            MovementMode closest = WANDER;
+            double smallestDelta = Double.MAX_VALUE;
+            for (MovementMode mode : values()) {
+                double delta = Math.abs(mode.navSpeedModifier - navSpeed);
+                if (delta < smallestDelta) {
+                    smallestDelta = delta;
+                    closest = mode;
+                }
+            }
+            return closest;
         }
     }
 }

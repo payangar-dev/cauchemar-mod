@@ -1,6 +1,6 @@
 package com.payangar.cauchemar.entity;
 
-import com.payangar.cauchemar.entity.climber.Orientation;
+import com.payangar.cauchemar.movement.climber.Orientation;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.damagesource.DamageSource;
