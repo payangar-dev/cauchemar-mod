@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.payangar.cauchemar.registry.ModBlocks;
 import com.payangar.cauchemar.registry.ModEntities;
 import com.payangar.cauchemar.registry.ModItems;
+import com.payangar.cauchemar.registry.ModSounds;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
@@ -26,6 +27,7 @@ public class Cauchemar {
         ModBlocks.register(modEventBus);
         ModItems.register(modEventBus);
         ModEntities.register(modEventBus);
+        ModSounds.register(modEventBus);
 
         modEventBus.addListener(this::commonSetup);
 

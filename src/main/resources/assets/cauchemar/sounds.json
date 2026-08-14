@@ -1,0 +1,38 @@
+{
+  "block.spider_egg.break": {
+    "subtitle": "subtitles.cauchemar.block.spider_egg.break",
+    "sounds": [
+      "cauchemar:block/spider_egg/break1",
+      "cauchemar:block/spider_egg/break2",
+      "cauchemar:block/spider_egg/break3",
+      "cauchemar:block/spider_egg/break4"
+    ]
+  },
+  "block.spider_egg.place": {
+    "subtitle": "subtitles.cauchemar.block.spider_egg.place",
+    "sounds": [
+      "cauchemar:block/spider_egg/break1",
+      "cauchemar:block/spider_egg/break2",
+      "cauchemar:block/spider_egg/break3",
+      "cauchemar:block/spider_egg/break4"
+    ]
+  },
+  "block.spider_egg.step": {
+    "subtitle": "subtitles.cauchemar.block.spider_egg.step",
+    "sounds": [
+      "cauchemar:block/spider_egg/step1",
+      "cauchemar:block/spider_egg/step2",
+      "cauchemar:block/spider_egg/step3",
+      "cauchemar:block/spider_egg/step4"
+    ]
+  },
+  "block.spider_egg.hit": {
+    "subtitle": "subtitles.cauchemar.block.spider_egg.hit",
+    "sounds": [
+      "cauchemar:block/spider_egg/step1",
+      "cauchemar:block/spider_egg/step2",
+      "cauchemar:block/spider_egg/step3",
+      "cauchemar:block/spider_egg/step4"
+    ]
+  }
+}
