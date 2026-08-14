@@ -1,6 +1,7 @@
 # Cauchemar — règles de travail
 
 Mod NeoForge 1.21.1. La conception vit dans [DESIGN.md](DESIGN.md), à lire avant toute intervention.
+Le détail de chaque feature vit dans `docs/`.
 
 ## On conçoit ensemble, avant de coder
 
@@ -13,10 +14,22 @@ Attends son accord. Une feature dont il ne comprend pas le fonctionnement est un
 Corollaire : ne pars jamais d'un besoin flou. Si la demande admet plusieurs lectures, pose la
 question au lieu de choisir à sa place.
 
-## Le DESIGN.md suit le code
+## La documentation suit le code, sur deux niveaux
 
-Toute feature livrée est décrite dans `DESIGN.md`, dans la PR qui la livre. Pas de PR de code sans
-mise à jour du document, pas de document en avance sur le code. Ce qui n'y figure pas n'existe pas.
+Toute feature livrée est documentée dans la PR qui la livre. Pas de PR de code sans mise à jour de la
+documentation, pas de documentation en avance sur le code. Ce qui n'y figure pas n'existe pas.
+
+Deux niveaux, et le mélange des deux est la faute à éviter :
+
+- **`DESIGN.md`** porte la logique d'ensemble du mod : la vision, ce que chaque feature apporte au
+  joueur, comment elles s'articulent. Quelques lignes par feature, du point de vue du joueur. Aucune
+  valeur chiffrée, aucun nom de classe, aucun détail de moteur.
+- **`docs/<feature>.md`** porte l'implémentation : les valeurs et pourquoi celles-là, les classes et
+  les points d'entrée, les pièges du moteur rencontrés, les pistes explorées puis écartées et la
+  raison. C'est là qu'on peut être long, et c'est ce qui évite de refaire deux fois la même enquête.
+
+Une page `docs/` renvoie à `DESIGN.md` pour l'intention, et `DESIGN.md` renvoie à la page pour le
+détail.
 
 ## Une feature, une PR
 

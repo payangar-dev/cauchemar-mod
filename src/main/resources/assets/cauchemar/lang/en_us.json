@@ -2,5 +2,13 @@
   "cauchemar.configuration.title": "Cauchemar Config",
   "cauchemar.configuration.exampleToggle": "Example Toggle",
 
-  "entity.cauchemar.mother_spider": "Mother Spider"
+  "entity.cauchemar.mother_spider": "Mother Spider",
+
+  "block.cauchemar.spider_egg": "Spider Egg",
+  "block.cauchemar.spider_egg_hatched": "Hatched Spider Egg",
+
+  "subtitles.cauchemar.block.spider_egg.break": "Spider egg bursts",
+  "subtitles.cauchemar.block.spider_egg.place": "Spider egg placed",
+  "subtitles.cauchemar.block.spider_egg.step": "Footsteps",
+  "subtitles.cauchemar.block.spider_egg.hit": "Spider egg squelches"
 }
