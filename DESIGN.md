@@ -36,6 +36,7 @@ Ce qui existe aujourd'hui :
 | Assets Mother Spider (modèle, texture, 5 animations) | En place |
 | Entité `cauchemar:mother_spider` | Existe et s'affiche, joue `animation.idle`, ne fait rien d'autre |
 | Blocs `cauchemar:spider_egg` et `spider_egg_hatched` | En place et complets |
+| Araignées en particules autour des pontes | En place |
 | Déplacement, IA, combat | Néant |
 | Spawn naturel | Néant, l'entité n'apparaît que par `/summon` |
 
@@ -70,6 +71,21 @@ et vidée. Ce qu'elles changent pour le joueur :
   au Toucher de Soie, n'éveille rien.
 
 Détail d'implémentation : [docs/spider-eggs.md](docs/spider-eggs.md).
+
+### Ce qui grouille autour (particules)
+
+Une ponte intacte n'est jamais tout à fait immobile : une ou deux petites araignées rôdent en
+permanence autour d'elle, marchent sur le sol, grimpent aux murs, passent au plafond, s'arrêtent et
+repartent. Elles ne s'éloignent jamais beaucoup de leur ponte, et disparaissent peu après elle.
+
+C'est le premier signal que le joueur reçoit, avant même de distinguer la ponte : quelque chose bouge
+au bord du champ de vision. Il peut les écraser en marchant dessus, mais tant que la ponte est là,
+elle en refait.
+
+Déchirer une ponte en libère parfois **une nuée** qui détale dans toutes les directions avant de se
+perdre dans le noir. C'est un effet, pas une menace : ces araignées-là ne sont que du décor.
+
+Détail d'implémentation : [docs/spider-particles.md](docs/spider-particles.md).
 
 ## Roadmap
 

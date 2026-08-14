@@ -1,6 +1,8 @@
 package com.payangar.cauchemar.block;
 
 import com.payangar.cauchemar.Cauchemar;
+import com.payangar.cauchemar.client.SpiderNursery;
+import com.payangar.cauchemar.registry.ModParticles;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
@@ -8,6 +10,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.EnchantmentTags;
 import net.minecraft.tags.TagKey;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobSpawnType;
@@ -62,39 +66,98 @@ public class SpiderEggBlock extends Block {
     /** How much faster those tools cut through the eggs. Same factor a cobweb gives them. */
     private static final float CUTTING_SPEED_BONUS = 15.0F;
 
-    /** Share of hatchings that release a cave spider rather than an ordinary one. */
+    /** Chance that tearing a sealed egg open releases a spider. */
+    private static final float HATCH_CHANCE = 0.15F;
+    /** Share of those hatchings that release a cave spider rather than an ordinary one. */
     private static final float CAVE_SPIDER_SHARE = 0.10F;
 
-    private final VoxelShape shape;
-    private final float hatchChance;
+    /** Chance that a sealed egg spills a swarm of hatchlings. Purely visual, no entity involved. */
+    private static final float SWARM_CHANCE = 1.0F / 3.0F;
+    private static final int SWARM_SIZE = 12;
+    /**
+     * Bearings sent to the hatchlings. The particle reads the length as a pace and clamps it to its
+     * own fleeing range, so these only have to sit within it.
+     */
+    private static final double SWARM_MIN_SPEED = 0.09;
+    private static final double SWARM_MAX_SPEED = 0.17;
 
-    public SpiderEggBlock(Properties properties, VoxelShape shape, float hatchChance) {
+
+    private final VoxelShape shape;
+    private final boolean sealed;
+
+    public SpiderEggBlock(Properties properties, VoxelShape shape, boolean sealed) {
         super(properties);
         this.shape = shape;
-        this.hatchChance = hatchChance;
+        this.sealed = sealed;
     }
 
     /**
-     * Tearing an egg open can release what was growing inside. Modelled on vanilla's infested
-     * blocks, which spawn a silverfish the same way.
+     * Tearing a sealed egg open disturbs what was growing inside: a swarm of hatchlings may spill
+     * out, and a real spider may come with it. The two are rolled apart, so an egg can do either,
+     * both or neither. Modelled on vanilla's infested blocks, which spawn a silverfish this way.
      *
-     * <p>Nothing hatches when the egg is harvested whole, with shears or Silk Touch: there is no
+     * <p>Nothing happens when the egg is harvested whole, with shears or Silk Touch: there is no
      * broken egg then, and the block itself is in the player's hands.
      */
     @Override
     protected void spawnAfterBreak(BlockState state, ServerLevel level, BlockPos pos, ItemStack stack, boolean dropExperience) {
         super.spawnAfterBreak(state, level, pos, stack, dropExperience);
 
-        if (this.hatchChance <= 0.0F || !level.getGameRules().getBoolean(GameRules.RULE_DOBLOCKDROPS)) {
+        if (!this.sealed || !level.getGameRules().getBoolean(GameRules.RULE_DOBLOCKDROPS)) {
             return;
         }
         if (stack.is(Items.SHEARS) || EnchantmentHelper.hasTag(stack, EnchantmentTags.PREVENTS_INFESTED_SPAWNS)) {
             return;
         }
-        if (level.random.nextFloat() >= this.hatchChance) {
-            return;
-        }
 
+        if (level.random.nextFloat() < SWARM_CHANCE) {
+            spillSwarm(level, pos);
+        }
+        if (level.random.nextFloat() < HATCH_CHANCE) {
+            hatchSpider(level, pos);
+        }
+    }
+
+    /**
+     * A sealed clutch is never quite still: a hatchling or two wander around it.
+     *
+     * <p>Client side only, and fired at random for blocks near the player, so there is no way to
+     * count what is already out there. The population is steered by birth rate against the
+     * particle's own lifetime instead, which lands around one at a time and gives the occasional
+     * none or pair.
+     */
+    @Override
+    public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {
+        // The side check is not decoration: animateTick is a common method that Minecraft merely
+        // happens to call from the client, and SpiderNursery is client-only code. Guarding the call
+        // keeps a dedicated server from ever resolving that class.
+        if (this.sealed && level.isClientSide) {
+            SpiderNursery.tendTo(level, pos, random);
+        }
+    }
+
+    /**
+     * Scatters hatchlings outwards from the middle of the block. Each one is sent on its own, with
+     * a particle count of zero: that is what turns the packet's offsets into an exact velocity. Any
+     * count above zero would have the client scatter them at random instead, which is precisely
+     * what we are avoiding here.
+     */
+    private static void spillSwarm(ServerLevel level, BlockPos pos) {
+        // At the very bottom of the block: it is already air by now, and the hatchlings look for
+        // their footing downwards from where they are handed.
+        double x = pos.getX() + 0.5;
+        double y = pos.getY();
+        double z = pos.getZ() + 0.5;
+
+        for (int i = 0; i < SWARM_SIZE; i++) {
+            double heading = level.random.nextDouble() * Mth.TWO_PI;
+            double speed = SWARM_MIN_SPEED + level.random.nextDouble() * (SWARM_MAX_SPEED - SWARM_MIN_SPEED);
+            level.sendParticles(ModParticles.SPIDER.get(), x, y, z, 0,
+                    Math.cos(heading) * speed, 0.0, Math.sin(heading) * speed, 1.0);
+        }
+    }
+
+    private static void hatchSpider(ServerLevel level, BlockPos pos) {
         EntityType<? extends Spider> type =
                 level.random.nextFloat() < CAVE_SPIDER_SHARE ? EntityType.CAVE_SPIDER : EntityType.SPIDER;
         Spider spider = type.spawn(level, pos, MobSpawnType.TRIGGERED);

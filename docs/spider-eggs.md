@@ -154,6 +154,12 @@ Calqué sur les blocs infestés vanilla, qui libèrent un poisson d'argent par l
 - l'apparition passe par `EntityType.spawn(..., MobSpawnType.TRIGGERED)`, ce qui déclenche la
   finalisation vanilla du spawn et l'animation de particules.
 
+## Araignées en particules
+
+Un œuf intact entretient une ou deux araignées décoratives autour de lui, et en libère une nuée quand
+il est déchiré. Tout ce mécanisme, y compris le peuplement tenu par `SpiderNursery` et le point
+d'entrée `animateTick` du bloc, est décrit dans [spider-particles.md](spider-particles.md).
+
 ## À faire
 
 - **Exempter la Mother Spider du ralentissement** quand elle se déplacera : elle serait freinée par

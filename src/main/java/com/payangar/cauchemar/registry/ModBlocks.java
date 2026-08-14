@@ -59,12 +59,12 @@ public final class ModBlocks {
      * dome. Tearing one open has a 15% chance of releasing a spider.
      */
     public static final DeferredBlock<SpiderEggBlock> SPIDER_EGG = BLOCKS.registerBlock("spider_egg",
-            props -> new SpiderEggBlock(props, Block.box(1.0, 0.0, 2.0, 15.0, 16.0, 14.0), 0.15F),
+            props -> new SpiderEggBlock(props, Block.box(1.0, 0.0, 2.0, 15.0, 16.0, 14.0), true),
             eggProperties());
 
     /** The same clutch after hatching: collapsed, no dome, and nothing left inside to come out. */
     public static final DeferredBlock<SpiderEggBlock> SPIDER_EGG_HATCHED = BLOCKS.registerBlock("spider_egg_hatched",
-            props -> new SpiderEggBlock(props, Block.box(1.0, 0.0, 2.0, 15.0, 10.0, 14.0), 0.0F),
+            props -> new SpiderEggBlock(props, Block.box(1.0, 0.0, 2.0, 15.0, 10.0, 14.0), false),
             eggProperties());
 
     public static void register(IEventBus modEventBus) {
